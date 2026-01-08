@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { Settings, Upload, Menu, X, Trash2, Edit2, BookOpen, MessageSquare, Loader2, Check, MessageSquarePlus, History, FolderInput, MoreVertical, Pencil, MessageSquare as MessageCircle, AlertTriangle, AlertCircle, Sparkles, Folder, RefreshCw, Save, XCircle, Play, ChevronRight, ListChecks, CheckSquare, Square, Zap, BrainCircuit, ChevronDown, ChevronUp, Copy, ChevronLeft, FastForward, Download, Edit, Key, Plus, Languages, ExternalLink, ArrowDown, Clipboard, RotateCcw } from 'lucide-react';
+import { Settings, Upload, Menu, X, Trash2, Edit2, BookOpen, MessageSquare, Loader2, Check, MessageSquarePlus, History, FolderInput, MoreVertical, Pencil, MessageSquare as MessageCircle, AlertTriangle, AlertCircle, Sparkles, Folder, RefreshCw, Save, XCircle, Play, ChevronRight, ListChecks, CheckSquare, Square, Zap, BrainCircuit, ChevronDown, ChevronUp, Copy, ChevronLeft, FastForward, Download, Edit, Key, Plus, Languages, ExternalLink, ArrowDown, Clipboard, RotateCcw, Cloud, CloudOff, Database } from 'lucide-react';
 import { INITIAL_SETTINGS, MOCK_CHARACTERS } from './constants';
 import { Character, AppSettings, ChatSession, Message, LorebookEntry, Lorebook } from './types';
 import { generateResponse, summarizeChat, googleTranslateFree } from './services/apiService';
@@ -7,6 +7,16 @@ import { SettingsModal } from './components/SettingsModal';
 import { CharacterModal } from './components/CharacterModal';
 import { Button } from './components/Button';
 import { FloatingImageViewer } from './components/FloatingImageViewer';
+import {
+  initializeDatabase,
+  loadAll,
+  saveCharacter,
+  saveSession,
+  saveSettings,
+  deleteCharacter as dbDeleteCharacter,
+  deleteSession as dbDeleteSession,
+  isDatabaseAvailable
+} from './services/databaseService';
 
 const generateId = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -503,12 +513,12 @@ interface ErrorState {
 function App() {
   const [characters, setCharacters] = useState<Character[]>(MOCK_CHARACTERS);
   const [settings, setSettings] = useState<AppSettings>(INITIAL_SETTINGS);
-  
+
   const [activeCharId, setActiveCharId] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chatSelection, setChatSelection] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Record<string, ChatSession>>({});
-  
+
   const [sessionAction, setSessionAction] = useState<SessionAction | null>(null);
   const [renameInput, setRenameInput] = useState("");
   const [errorModal, setErrorModal] = useState<ErrorState | null>(null);
@@ -519,7 +529,7 @@ function App() {
   const [settingsTab, setSettingsTab] = useState<'general' | 'generation' | 'world'>('general');
   const [isCharModalOpen, setIsCharModalOpen] = useState(false);
   const [editingChar, setEditingChar] = useState<Character | null>(null);
-  
+
   const [inputVal, setInputVal] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isOrbFlashed, setIsOrbFlashed] = useState(false);
@@ -527,10 +537,10 @@ function App() {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState("");
   const [messageToDeleteId, setMessageToDeleteId] = useState<string | null>(null);
-  
+
   const [manageMode, setManageMode] = useState<'chars' | 'sessions' | 'messages' | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  
+
   const [viewedImage, setViewedImage] = useState<string | null>(null);
 
   const [showQuotaModal, setShowQuotaModal] = useState(false);
@@ -549,8 +559,129 @@ function App() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
-  
+
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Database state
+  const [isDbReady, setIsDbReady] = useState(false);
+  const [isLoadingData, setIsLoadingData] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Initialize database and load data on mount
+  useEffect(() => {
+    const initAndLoad = async () => {
+      try {
+        const dbInitialized = await initializeDatabase();
+        setIsDbReady(dbInitialized);
+
+        if (dbInitialized) {
+          const { characters: loadedChars, sessions: loadedSessions, settings: loadedSettings } = await loadAll();
+
+          if (loadedChars.length > 0) {
+            setCharacters(loadedChars);
+          }
+
+          if (Object.keys(loadedSessions).length > 0) {
+            setSessions(loadedSessions);
+          }
+
+          if (loadedSettings) {
+            setSettings(loadedSettings);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load data from database:', error);
+      } finally {
+        setIsLoadingData(false);
+      }
+    };
+
+    initAndLoad();
+  }, []);
+
+  // Auto-save characters when they change
+  useEffect(() => {
+    if (!isDbReady || isLoadingData) return;
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = setTimeout(async () => {
+      if (characters.length === 0) return;
+
+      setIsSyncing(true);
+      try {
+        await Promise.all(characters.map(char => saveCharacter(char)));
+      } catch (error) {
+        console.error('Failed to save characters:', error);
+      } finally {
+        setIsSyncing(false);
+      }
+    }, 500);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [characters, isDbReady, isLoadingData]);
+
+  // Auto-save sessions when they change
+  useEffect(() => {
+    if (!isDbReady || isLoadingData) return;
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = setTimeout(async () => {
+      const sessionList = Object.values(sessions);
+      if (sessionList.length === 0) return;
+
+      setIsSyncing(true);
+      try {
+        await Promise.all(sessionList.map(session => saveSession(session)));
+      } catch (error) {
+        console.error('Failed to save sessions:', error);
+      } finally {
+        setIsSyncing(false);
+      }
+    }, 500);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [sessions, isDbReady, isLoadingData]);
+
+  // Auto-save settings when they change
+  useEffect(() => {
+    if (!isDbReady || isLoadingData) return;
+
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+    }
+
+    saveTimerRef.current = setTimeout(async () => {
+      setIsSyncing(true);
+      try {
+        await saveSettings(settings);
+      } catch (error) {
+        console.error('Failed to save settings:', error);
+      } finally {
+        setIsSyncing(false);
+      }
+    }, 500);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, [settings, isDbReady, isLoadingData]);
 
   useEffect(() => {
     if (isGenerating && chatContainerRef.current) {
@@ -646,8 +777,10 @@ function App() {
       setSessionAction({ type: 'bulk_delete', count: selectedIds.size });
   };
 
-  const performBulkDelete = () => {
+  const performBulkDelete = async () => {
       if (manageMode === 'chars') {
+          const charIdsToDelete = Array.from(selectedIds);
+
           setCharacters(prev => prev.filter(c => !selectedIds.has(c.id)));
           setSessions(prev => {
               const next = { ...prev };
@@ -661,8 +794,19 @@ function App() {
               setActiveSessionId(null);
               setChatSelection(null);
           }
+
+          if (isDbReady) {
+              try {
+                  await Promise.all(charIdsToDelete.map(id => dbDeleteCharacter(id)));
+              } catch (error) {
+                  console.error('Failed to delete characters from database:', error);
+              }
+          }
+
           showToast(`Deleted ${selectedIds.size} entities`, 'success');
       } else if (manageMode === 'sessions') {
+          const sessionIdsToDelete = Array.from(selectedIds);
+
           setSessions(prev => {
               const next = { ...prev };
               selectedIds.forEach(id => delete next[id]);
@@ -671,6 +815,15 @@ function App() {
           if (activeSessionId && selectedIds.has(activeSessionId)) {
               setActiveSessionId(null);
           }
+
+          if (isDbReady) {
+              try {
+                  await Promise.all(sessionIdsToDelete.map(id => dbDeleteSession(id)));
+              } catch (error) {
+                  console.error('Failed to delete sessions from database:', error);
+              }
+          }
+
           showToast(`Deleted ${selectedIds.size} memories`, 'success');
       } else if (manageMode === 'messages' && activeSession) {
           setSessions(prev => ({
@@ -683,7 +836,7 @@ function App() {
           }));
           showToast(`Deleted ${selectedIds.size} messages`, 'success');
       }
-      
+
       setSessionAction(null);
       setManageMode(null);
       setSelectedIds(new Set());
@@ -1418,7 +1571,7 @@ function App() {
     }
   };
   const initiateDeleteSession = (sessionId: string) => setSessionAction({ type: 'delete', sessionId });
-  const performDeleteSession = () => {
+  const performDeleteSession = async () => {
      if (sessionAction?.type === 'delete' && sessionAction.sessionId) {
       const sessionId = sessionAction.sessionId;
       setSessions(prev => {
@@ -1427,6 +1580,15 @@ function App() {
         return next;
       });
       if (activeSessionId === sessionId) setActiveSessionId(null);
+
+      if (isDbReady) {
+        try {
+          await dbDeleteSession(sessionId);
+        } catch (error) {
+          console.error('Failed to delete session from database:', error);
+        }
+      }
+
       setSessionAction(null);
       showToast("Record deleted", "success");
     }
@@ -1652,7 +1814,23 @@ function App() {
 
                     {activeChar && activeSession && <div className="w-px h-4 bg-zinc-700/50 mx-1"></div>}
 
-                    <button 
+                    {isDbReady && (
+                        <div className="flex items-center gap-2 text-[10px] text-zinc-500 px-2" title={isSyncing ? "Saving..." : "All changes saved"}>
+                            {isSyncing ? (
+                                <>
+                                    <Loader2 size={12} className="animate-spin text-orange-500" />
+                                    <span className="hidden sm:inline">Syncing</span>
+                                </>
+                            ) : (
+                                <>
+                                    <Database size={12} className="text-emerald-500" />
+                                    <span className="hidden sm:inline">Saved</span>
+                                </>
+                            )}
+                        </div>
+                    )}
+
+                    <button
                         onClick={() => { setSettingsTab('general'); setIsSettingsOpen(true); }}
                         className="p-2 text-zinc-400 hover:text-white hover:bg-white/5 rounded-md transition-all duration-300 group"
                         title="Configuration"
